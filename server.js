@@ -8,16 +8,46 @@ const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] }
 });
 
-// สถานะกลางของทั้งเซิร์ฟเวอร์
+// สถานะกลาง
 let globalState = {
   gameState: 'BETTING', // BETTING | DEALING
   countdown: 10,
   locked: false,
-  adminWinMode: 'normal',
+  adminWinMode: 'normal', // normal | force_player | force_banker | tie
   history: []
 };
 
 let timerInterval = null;
+
+// ฟังก์ชันสุ่มไพ่
+const suits = ['♠', '♥', '♦', '♣'];
+const values = ['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
+const drawCard = () => ({
+  value: values[Math.floor(Math.random() * values.length)],
+  suit: suits[Math.floor(Math.random() * suits.length)],
+  isRed: false // เดี๋ยว client จัดการสีเอง
+});
+const getVal = (card) => ['10','J','Q','K'].includes(card.value) ? 0 : card.value === 'A' ? 1 : parseInt(card.value);
+const calcScore = (hand) => hand.reduce((sum, c) => sum + getVal(c), 0) % 10;
+
+function generateGameResult() {
+  let pHand = [drawCard(), drawCard()];
+  let bHand = [drawCard(), drawCard()];
+  
+  // ถ้าแอดมินล็อกผลไว้ ให้บังคับไพ่
+  if (globalState.adminWinMode === 'force_player') {
+    pHand = [{value:'9', suit:'♠'}, {value:'9', suit:'♥'}]; // Player 8 แต้ม
+    bHand = [{value:'10', suit:'♦'}, {value:'5', suit:'♣'}]; // Banker 5 แต้ม
+  } else if (globalState.adminWinMode === 'force_banker') {
+    pHand = [{value:'10', suit:'♦'}, {value:'4', suit:'♣'}]; // Player 4 แต้ม
+    bHand = [{value:'9', suit:'♠'}, {value:'9', suit:'♥'}]; // Banker 8 แต้ม
+  } else if (globalState.adminWinMode === 'force_tie') {
+    pHand = [{value:'5', suit:'♠'}, {value:'5', suit:'♥'}]; // Player 0 แต้ม
+    bHand = [{value:'10', suit:'♦'}, {value:'10', suit:'♣'}]; // Banker 0 แต้ม
+  }
+
+  return { pHand, bHand };
+}
 
 function startRound() {
   if (globalState.locked) return;
@@ -29,7 +59,7 @@ function startRound() {
   if (timerInterval) clearInterval(timerInterval);
   
   timerInterval = setInterval(() => {
-    if (globalState.locked) return; // ถ้าล็อกอยู่ให้หยุดนับ
+    if (globalState.locked) return;
 
     globalState.countdown--;
     io.emit('stateSync', globalState);
@@ -39,40 +69,34 @@ function startRound() {
       globalState.gameState = 'DEALING';
       io.emit('stateSync', globalState);
       
-      // สั่งให้ทุก Client เริ่มแจกไพ่พร้อมกัน
-      io.emit('startDealing');
+      // คำนวณไพ่ที่เซิร์ฟเวอร์
+      const result = generateGameResult();
       
-      // หน่วงเวลา 15 วินาทีเพื่อให้ฝั่ง Client แสดงแอนิเมชันเสร็จ แล้วเริ่มรอบใหม่
+      // ส่งไพ่ให้ทุกคนพร้อมกัน
+      io.emit('startDealing', result);
+      
+      // หน่วงเวลา 12 วินาทีให้แอนิเมชันจบ แล้วเริ่มรอบใหม่
       setTimeout(() => {
         startRound();
-      }, 15000); 
+      }, 12000); 
     }
   }, 1000);
 }
 
 io.on('connection', (socket) => {
-  // ส่งสถานะล่าสุดให้คนที่เพิ่งเข้ามาเห็นเวลาตรงกับคนอื่น
   socket.emit('stateSync', globalState);
 
-  // รับคำสั่งจากแอดมิน
   socket.on('adminAction', (data) => {
     if (data.type === 'LOCK') {
       globalState.locked = data.status;
       io.emit('stateSync', globalState);
     } else if (data.type === 'SET_WIN_MODE') {
       globalState.adminWinMode = data.mode;
-    } else if (data.type === 'FORCE_START') {
-      globalState.locked = false;
-      globalState.countdown = 1; // เร่งเวลาให้เริ่มทันที
-      io.emit('stateSync', globalState);
+      console.log('Admin changed win mode to:', data.mode);
     }
   });
-
-  // รับผลลัพธ์จาก Client (ในที่นี้ให้ Client สุ่ม แต่ถ้าอยากให้ปลอดภัยต้องย้าย Logic ไพ่มา Server)
-  // *เพื่อความง่ายที่สุด ข้ามขั้นตอนนี้ไปก่อน
 });
 
-// เริ่มต้นระบบ
 startRound();
 
 const PORT = process.env.PORT || 3000;
